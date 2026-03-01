@@ -1,74 +1,106 @@
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 
-focal_length_mm = 8.0
-distance_z_mm = 720.0
-pixel_size_mm = 0.0022
+FOCAL_LENGTH = 8.0
+OBJECT_Z_DIST = 720.0
+PIXEL_PITCH = 0.0022
 
+SCALE_MM_PER_PX = (PIXEL_PITCH * OBJECT_Z_DIST) / FOCAL_LENGTH
 
-magnification = distance_z_mm / focal_length_mm
-mm_per_pixel = magnification * pixel_size_mm
+image_bgr = cv2.imread("../inputs/earrings.jpg")
+if image_bgr is None:
+    raise FileNotFoundError("Could not find 'earrings.jpg'")
 
-print(f"Camera Scale: 1 pixel = {mm_per_pixel:.4f} mm")
+image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+gray_image = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
 
-img_path = 'earrings.jpg'
-image = cv2.imread(img_path)
+_, binary_mask = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
 
-if image is None:
-    print(
-        f"Error: Could not load image at '{img_path}'. Please check the file name and path.")
-else:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+contours, hierarchy = cv2.findContours(binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    _, binary = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+valid_shapes = {}
+for idx, contour in enumerate(contours):
+    if cv2.contourArea(contour) > 500:  
+        parent_id = hierarchy[0][idx][3]
+        valid_shapes[idx] = {
+            'is_exterior': (parent_id == -1),
+            'parent': parent_id,
+            'rect': cv2.boundingRect(contour)
+        }
 
-    kernel = np.ones((5, 5), np.uint8)
-    binary_cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+annotated_img = image_rgb.copy()
+table_rows = []
+recorded_types = {"Exterior": False, "Interior": False}
 
-    contours, _ = cv2.findContours(
-        binary_cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+for idx, data in valid_shapes.items():
+    x, y, w, h = data['rect']
+    
+    if not data['is_exterior'] and data['parent'] in valid_shapes:
+        parent_rect = valid_shapes[data['parent']]['rect']
+        bottom_y = y + h
+        y = parent_rect[1]  
+        h = bottom_y - y    
+        
+    shape_type = "Exterior" if data['is_exterior'] else "Interior"
+    
+    color = (0, 255, 0) if data['is_exterior'] else (255, 165, 0)
+    
+    if not recorded_types[shape_type]:
+        w_mm, h_mm = w * SCALE_MM_PER_PX, h * SCALE_MM_PER_PX
+        table_rows.append([shape_type, w, f"{w_mm:.2f}", h, f"{h_mm:.2f}"])
+        recorded_types[shape_type] = True
 
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:2]
+    cv2.rectangle(annotated_img, (x, y), (x + w, y + h), color, 2)
+    
+    cx, cy = x + w // 2, y + h // 2
+    
+    cv2.line(annotated_img, (x, cy), (x + w, cy), color, 1)
+    cv2.circle(annotated_img, (x, cy), 4, color, -1)
+    cv2.circle(annotated_img, (x + w, cy), 4, color, -1)
+    
+    cv2.line(annotated_img, (cx, y), (cx, y + h), color, 1)
+    cv2.circle(annotated_img, (cx, y), 4, color, -1)
+    cv2.circle(annotated_img, (cx, y + h), 4, color, -1)
 
-    output_img = image.copy()
+img_h, img_w = image_rgb.shape[:2]
+max_mm_w = img_w * SCALE_MM_PER_PX
+max_mm_h = img_h * SCALE_MM_PER_PX
 
-    print("\n Measurement Results ")
+fig = plt.figure(figsize=(10, 10))
+gs = fig.add_gridspec(6, 1) 
+ax_img = fig.add_subplot(gs[:5, 0]) 
+ax_tbl = fig.add_subplot(gs[5, 0])  
 
-    for i, cnt in enumerate(contours):
-        x, y, w, h = cv2.boundingRect(cnt)
+ax_img.imshow(annotated_img, extent=[0, max_mm_w, max_mm_h, 0])
 
-        real_width = w * mm_per_pixel
-        real_height = h * mm_per_pixel
+ax_img.xaxis.set_major_locator(MultipleLocator(10))
+ax_img.yaxis.set_major_locator(MultipleLocator(10))
+ax_img.xaxis.set_minor_locator(MultipleLocator(2))
+ax_img.yaxis.set_minor_locator(MultipleLocator(2))
 
-        print(
-            f"Earring {i+1}: Width = {real_width:.2f} mm, Height = {real_height:.2f} mm")
+ax_img.grid(which='major', color='#333333', linestyle='-', linewidth=1.2, alpha=0.7)
+ax_img.grid(which='minor', color='#777777', linestyle='--', linewidth=0.6, alpha=0.4)
 
-        cv2.rectangle(output_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+ax_img.set_xlabel("Physical Width (mm)", fontsize=11, fontweight='bold')
+ax_img.set_ylabel("Physical Height (mm)", fontsize=11, fontweight='bold')
+ax_img.set_title("Machine Vision: Earring Dimensional Analysis", fontsize=14, fontweight='bold', pad=15)
 
-        cx, cy = x + w//2, y + h//2
-        cv2.drawMarker(output_img, (cx, cy), (0, 0, 255),
-                       cv2.MARKER_CROSS, 20, 2)
+ax_tbl.axis('off')
+headers = ["Boundary Type", "Pixel Width", "Width (mm)", "Pixel Height", "Height (mm)"]
+data_table = ax_tbl.table(cellText=table_rows, colLabels=headers, loc='center', cellLoc='center')
+data_table.scale(1, 1.8)
+data_table.set_fontsize(11)
 
-        text_label = f"W:{real_width:.1f}mm H:{real_height:.1f}mm"
+for (row_idx, col_idx), cell in data_table.get_celld().items():
+    cell.set_edgecolor('#bdc3c7')
+    if row_idx == 0:
+        cell.set_facecolor('#2c3e50') 
+        cell.set_text_props(color='white', weight='bold')
+    else:
+        cell.set_facecolor('#ecf0f1') 
 
-        (text_w, text_h), _ = cv2.getTextSize(
-            text_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(output_img, (x, y - text_h - 10),
-                      (x + text_w, y), (0, 0, 0), -1)
-        cv2.putText(output_img, text_label, (x, y - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-    output_rgb = cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB)
-
-    plt.figure(figsize=(10, 8))
-    plt.imshow(output_rgb)
-    plt.title("Automated Earring Measurement (Question 2)",
-              fontsize=16, fontweight='bold', pad=15)
-    plt.axis('off')
-
-    plt.tight_layout()
-    plt.savefig('q2_earring_measurement.png', dpi=300, bbox_inches='tight')
-    print("\nSaved image as 'q2_earring_measurement.png'")
-    plt.show()
+plt.tight_layout()
+plt.savefig("q2_final_measurements.png", dpi=300, bbox_inches='tight')
+print("\nImage saved as 'q2_final_measurements.png'")
+plt.show()
